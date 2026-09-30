@@ -154,6 +154,76 @@ export function removeTags(inspirationId: string, tagIds: string[]): number {
   return removed;
 }
 
+/**
+ * 并发安全的批量打标（文档 11.2）。
+ * - 入参先去重；同一标签既加又删视为请求自相矛盾，直接 400；
+ * - 标签必须存在且属于当前库（跨库 tagId 不允许借并发混入）；
+ * - 每张卡的加/减在单事务内完成，INSERT ... ON CONFLICT DO NOTHING 兜底主键，
+ *   因此重复/并发提交不会产生重复关系，usage_count 也不会漂移。
+ */
+export function bulkTag(params: {
+  libraryId: string;
+  inspirationIds: string[];
+  addTagIds: string[];
+  removeTagIds: string[];
+}): { added: number; removed: number } {
+  const db = getDb();
+  const inspirationIds = [...new Set(params.inspirationIds)];
+  const addTagIds = [...new Set(params.addTagIds)];
+  const removeTagIds = [...new Set(params.removeTagIds)];
+
+  const overlap = addTagIds.filter((t) => removeTagIds.includes(t));
+  if (overlap.length) throw errors.badRequest('同一标签不能同时加入与移除', { tagIds: overlap });
+
+  for (const inspirationId of inspirationIds) requireInspiration(inspirationId, params.libraryId);
+  const allTagIds = [...addTagIds, ...removeTagIds];
+  for (const tagId of allTagIds) {
+    const tag = db.prepare('SELECT library_id FROM tag WHERE id = ?').get(tagId) as
+      | { library_id: string }
+      | undefined;
+    if (!tag) throw errors.notFound('标签');
+    if (tag.library_id !== params.libraryId) throw errors.scopeDenied();
+  }
+
+  let added = 0;
+  let removed = 0;
+  const ts = nowIso();
+  const insertStmt = db.prepare(
+    `INSERT INTO inspiration_tag (inspiration_id, tag_id, source, created_at) VALUES (?,?, 'bulk', ?)
+     ON CONFLICT (inspiration_id, tag_id) DO NOTHING`,
+  );
+  const deleteStmt = db.prepare('DELETE FROM inspiration_tag WHERE inspiration_id = ? AND tag_id = ?');
+
+  const apply = db.transaction(() => {
+    for (const inspirationId of inspirationIds) {
+      for (const tagId of addTagIds) {
+        const res = insertStmt.run(inspirationId, tagId, ts);
+        if (res.changes > 0) {
+          added += 1;
+          db.prepare('UPDATE tag SET usage_count = usage_count + 1 WHERE id = ?').run(tagId);
+        }
+      }
+      for (const tagId of removeTagIds) {
+        const res = deleteStmt.run(inspirationId, tagId);
+        if (res.changes > 0) {
+          removed += 1;
+          db.prepare('UPDATE tag SET usage_count = MAX(0, usage_count - 1) WHERE id = ?').run(tagId);
+        }
+      }
+    }
+  });
+  apply();
+
+  if (added || removed) {
+    for (const inspirationId of inspirationIds) {
+      touch(inspirationId);
+      reindexFts(inspirationId);
+      syncStatus(inspirationId);
+    }
+  }
+  return { added, removed };
+}
+
 export function setSpot(inspirationId: string, spotId: string | null): void {
   getDb()
     .prepare('UPDATE inspiration SET spot_id = ?, updated_at = ? WHERE id = ?')

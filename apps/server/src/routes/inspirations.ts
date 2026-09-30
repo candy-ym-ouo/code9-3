@@ -20,12 +20,11 @@ import { authenticate, currentUser, requireOwner } from '../http/middleware.js';
 import { ctxOf } from '../http/context.js';
 import { errors } from '../http/errors.js';
 import {
-  addTags,
   archiveInspiration,
+  bulkTag,
   createInspiration,
   dropInspiration,
   mergeInspirations,
-  removeTags,
   requireInspiration,
   reindexFts,
   setSpot,
@@ -246,13 +245,12 @@ inspirationRouter.post(
   ah(async (req, res) => {
     const ctx = ctxOf(req);
     const input = bulkTagSchema.parse(req.body);
-    let added = 0;
-    let removed = 0;
-    for (const id of input.ids) {
-      requireInspiration(id, ctx.libraryId);
-      if (input.addTagIds.length) added += addTags(id, input.addTagIds, 'bulk');
-      if (input.removeTagIds.length) removed += removeTags(id, input.removeTagIds);
-    }
+    const { added, removed } = bulkTag({
+      libraryId: ctx.libraryId,
+      inspirationIds: input.ids,
+      addTagIds: input.addTagIds,
+      removeTagIds: input.removeTagIds,
+    });
     ok(res, { added, removed });
   }),
 );

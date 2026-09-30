@@ -23,6 +23,7 @@ export const errors = {
   weatherUnavailable: () => new ApiError('WEATHER_SOURCE_UNAVAILABLE', 503, '天气源不可用，已进入降级模式'),
   albumHasRequiredGaps: (n: number) =>
     new ApiError('ALBUM_HAS_REQUIRED_GAPS', 409, `存在 ${n} 条必需缺口，无法发布`),
+  tagCycle: () => new ApiError('TAG_CYCLE_PARENT', 409, '不能把标签挂到自己或自己的子孙标签下，会形成循环父子关系'),
   resultAlreadyFilled: () => new ApiError('RESULT_ALREADY_FILLED', 409, '该计划已回填，如需修改请使用修订接口'),
   geoOutOfRange: () => new ApiError('GEO_OUT_OF_RANGE', 422, '坐标越界或缺失'),
   shareExpired: () => new ApiError('SHARE_EXPIRED', 401, '分享链接已过期'),
