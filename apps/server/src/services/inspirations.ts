@@ -154,6 +154,84 @@ export function removeTags(inspirationId: string, tagIds: string[]): number {
   return removed;
 }
 
+/**
+ * 批量打标（文档 11.2）：对一批灵感统一加/去标签。
+ * - 入参先去重（同一请求里重复的灵感/标签不应产生任何放大效应）；
+ * - 全部写入包在一个事务里，better-sqlite3 的事务串行执行，
+ *   配合 inspiration_tag 主键与 INSERT ... ON CONFLICT DO NOTHING，
+ *   并发批量打标只会静默跳过已存在的关系，绝不产生重复关系；
+ * - 标签必须属于当前库，越库/不存在的 tagId 直接拒绝（事务回滚，不留半成功状态）。
+ * 返回的 added/removed 是真正发生变更的关系条数。
+ */
+export function bulkTag(
+  libraryId: string,
+  inspirationIds: string[],
+  addTagIds: string[],
+  removeTagIds: string[],
+  source: 'manual' | 'bulk' | 'album_gap' | 'suggested' = 'bulk',
+): { added: number; removed: number } {
+  const db = getDb();
+  const ids = [...new Set(inspirationIds)];
+  const adds = [...new Set(addTagIds)];
+  const removes = [...new Set(removeTagIds)];
+
+  for (const id of ids) requireInspiration(id, libraryId);
+  const tagScope = (tagIds: string[]): void => {
+    if (!tagIds.length) return;
+    const ph = tagIds.map(() => '?').join(',');
+    const owned = (
+      db
+        .prepare(`SELECT COUNT(*) AS n FROM tag WHERE id IN (${ph}) AND library_id = ?`)
+        .get(...tagIds, libraryId) as { n: number }
+    ).n;
+    if (owned !== tagIds.length) throw errors.badRequest('包含不存在或不属于当前库的标签');
+  };
+  tagScope(adds);
+  tagScope(removes);
+
+  const touchedIds = new Set<string>();
+  let added = 0;
+  let removed = 0;
+  const ts = nowIso();
+
+  const run = db.transaction(() => {
+    const insertStmt = db.prepare(
+      `INSERT INTO inspiration_tag (inspiration_id, tag_id, source, created_at) VALUES (?,?,?,?)
+       ON CONFLICT (inspiration_id, tag_id) DO NOTHING`,
+    );
+    const deleteStmt = db.prepare(
+      'DELETE FROM inspiration_tag WHERE inspiration_id = ? AND tag_id = ?',
+    );
+    for (const inspirationId of ids) {
+      for (const tagId of adds) {
+        const res = insertStmt.run(inspirationId, tagId, source, ts);
+        if (res.changes > 0) {
+          added += 1;
+          touchedIds.add(inspirationId);
+          db.prepare('UPDATE tag SET usage_count = usage_count + 1 WHERE id = ?').run(tagId);
+        }
+      }
+      for (const tagId of removes) {
+        const res = deleteStmt.run(inspirationId, tagId);
+        if (res.changes > 0) {
+          removed += 1;
+          touchedIds.add(inspirationId);
+          db.prepare('UPDATE tag SET usage_count = MAX(0, usage_count - 1) WHERE id = ?').run(tagId);
+        }
+      }
+    }
+  });
+  run();
+
+  // 事务外做派生维护：FTS、updated_at、状态机
+  for (const inspirationId of touchedIds) {
+    touch(inspirationId);
+    reindexFts(inspirationId);
+    syncStatus(inspirationId);
+  }
+  return { added, removed };
+}
+
 export function setSpot(inspirationId: string, spotId: string | null): void {
   getDb()
     .prepare('UPDATE inspiration SET spot_id = ?, updated_at = ? WHERE id = ?')

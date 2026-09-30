@@ -159,8 +159,8 @@ libraryRouter.post(
   ah(async (req, res) => {
     const ctx = ctxOf(req);
     const { targetId } = z.object({ targetId: z.string().min(1) }).parse(req.body);
-    mergeTags(req.params.id, targetId, ctx.libraryId);
-    ok(res, { merged: true });
+    const detail = mergeTags(req.params.id, targetId, ctx.libraryId);
+    ok(res, { merged: true, ...detail });
   }),
 );
 
